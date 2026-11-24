@@ -1,0 +1,5 @@
+[env]
+DISCORD_TOKEN = ""
+DISCORD_GUILD_ID = ""
+REDMINE_URL = "https://redmine.example.com/"
+REDMINE_API_KEY = ""
