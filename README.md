@@ -36,6 +36,8 @@ Redmine の管理画面で REST API を有効にします。
 
 `/ticket` コマンドから、プロジェクトの選択・チケット名を入力することでチケットを作成することができます。
 
+[![Discord Redmine Bridge (Usage)](https://img.youtube.com/vi/DFXAxKRgWk4/0.jpg)](https://www.youtube.com/watch?v=DFXAxKRgWk4)
+
 ## 開発
 
 ### Required
