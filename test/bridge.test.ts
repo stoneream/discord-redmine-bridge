@@ -43,7 +43,7 @@ test("accepts a Redmine base URL over HTTP or HTTPS", () => {
   assert.equal(result.status, 0, result.stderr);
 });
 
-test("logs the masked Redmine API key with the startup configuration", async (t) => {
+test("logs the masked Discord token and Redmine API key with the startup configuration", async (t) => {
   const env = {
     DISCORD_TOKEN: process.env.DISCORD_TOKEN,
     DISCORD_GUILD_ID: process.env.DISCORD_GUILD_ID,
@@ -73,7 +73,12 @@ test("logs the masked Redmine API key with the startup configuration", async (t)
   await import(entry.href);
 
   assert.deepEqual(info.mock.calls[0].arguments, [
-    { DISCORD_GUILD_ID: guildId, REDMINE_URL: baseUrl.href, REDMINE_API_KEY: "key34********" },
+    {
+      DISCORD_TOKEN: "test-*****",
+      DISCORD_GUILD_ID: guildId,
+      REDMINE_URL: baseUrl.href,
+      REDMINE_API_KEY: "key34********",
+    },
     "起動設定を読み込みました。",
   ]);
   assert.deepEqual(events, ["config", "login"]);
