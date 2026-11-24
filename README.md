@@ -29,7 +29,7 @@ Redmine の管理画面で REST API を有効にします。
 | --- | --- |
 | `DISCORD_TOKEN` | Discord Bot のトークン |
 | `DISCORD_GUILD_ID` | Bot をインストールした Discord サーバーの ID |
-| `REDMINE_URL` | Redmine の URL） |
+| `REDMINE_URL` | Redmine の URL |
 | `REDMINE_API_KEY` | Redmine の連携用アカウントの API キー |
 
 ### 使い方
