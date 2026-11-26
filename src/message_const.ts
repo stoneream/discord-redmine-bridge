@@ -13,7 +13,6 @@ export const ticketMessages = {
   subjectLabel: "チケット名",
   previousPage: "前へ",
   nextPage: "次へ",
-  selectProject: "プロジェクトを選択してください。",
   selectProjectPage: (page: number, pageCount: number) =>
     `プロジェクトを選択してください（${page}/${pageCount} ページ）。`,
   projectListUnavailable: `プロジェクト一覧を表示できませんでした。${contactAdmin}`,

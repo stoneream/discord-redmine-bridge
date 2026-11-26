@@ -62,7 +62,6 @@ function projectPicker(id: string, { projects, index, pageCount }: ProjectPage) 
     .setPlaceholder(ticketMessages.projectLabel)
     .addOptions(projects.map(projectOption));
   const selectRow = new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(select);
-  if (pageCount === 1) return { content: ticketMessages.selectProject, components: [selectRow] };
 
   const previous = new ButtonBuilder()
     .setCustomId(`${PROJECT_PAGE_PREFIX}${id}:${index - 1}`)

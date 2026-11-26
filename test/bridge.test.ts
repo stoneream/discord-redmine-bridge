@@ -286,11 +286,16 @@ test("fetches fresh project pages on command and submits a modal exactly once", 
   assert.equal(listingCount, 2);
 
   const listing = open.editReply.mock.calls[0].arguments[0];
-  assert.equal(listing.components?.length, 1);
+  assert.equal(listing.content, ticketMessages.selectProjectPage(1, 1));
+  assert.equal(listing.components?.length, 2);
   const [project] = actionRow(listing, 0);
   assert.ok(project.type === ComponentType.StringSelect);
   assert.equal(project.options.length, 1);
   assert.partialDeepStrictEqual(project.options[0], { label: "プロジェクト 2 (#1)", value: "1" });
+  assert.partialDeepStrictEqual(actionRow(listing, 1), [
+    { type: ComponentType.Button, label: ticketMessages.previousPage, disabled: true },
+    { type: ComponentType.Button, label: ticketMessages.nextPage, disabled: true },
+  ]);
 
   const select = projectSelection("select-project", project.custom_id, "1");
   await handle(select.asDiscordEvent());
