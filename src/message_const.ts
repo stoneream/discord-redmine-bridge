@@ -9,12 +9,12 @@ const checkRedmine = `Redmine でチケットが作成されていることを�
 export const ticketMessages = {
   commandDescription: "チケットを作成します",
   formTitle: "チケットの作成",
-  projectLabel: "プロジェクト",
   subjectLabel: "チケット名",
   previousPage: "前へ",
   nextPage: "次へ",
+  selectProject: "起票するプロジェクトを選択してください。",
   selectProjectPage: (page: number, pageCount: number) =>
-    `プロジェクトを選択してください（${page}/${pageCount} ページ）。`,
+    `起票するプロジェクトを選択してください（${page}/${pageCount} ページ）。`,
   projectListUnavailable: `プロジェクト一覧を表示できませんでした。${contactAdmin}`,
   noProjects: `選択できるプロジェクトが存在しません。${contactAdmin}`,
   invalidForm: `このフォームは使用できません。${reopenForm}${contactAdminIfPersistent}`,

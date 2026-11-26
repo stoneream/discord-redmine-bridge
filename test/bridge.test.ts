@@ -125,7 +125,7 @@ test("logs Discord error details with credentials redacted", () => {
   assert.doesNotMatch(logged.stdout, /test-secret|requestBody/);
 });
 
-function discordInteraction(kind: "command" | "select" | "button" | "modal", id: string) {
+function discordInteraction(kind: "command" | "button" | "modal", id: string) {
   const interaction = {
     id,
     guildId,
@@ -136,10 +136,8 @@ function discordInteraction(kind: "command" | "select" | "button" | "modal", id:
     customId: "",
     deferred: false,
     fields: { getTextInputValue: () => "" },
-    values: [] as string[],
     isChatInputCommand: () => kind === "command",
     isButton: () => kind === "button",
-    isStringSelectMenu: () => kind === "select",
     isModalSubmit: () => kind === "modal",
     isRepliable: () => true,
     showModal: mock.fn(async (modal: ModalBuilder) => modal.toJSON()),
@@ -161,35 +159,49 @@ function modalSubmission(id: string, customId: string, subject = "起票テス�
   return submit;
 }
 
-function actionRow(
-  response: InteractionReplyOptions | InteractionEditReplyOptions | InteractionUpdateOptions,
-  index: number,
-) {
-  const row = response.components?.[index];
-  assert.ok(row && "toJSON" in row);
-  const data = row.toJSON();
+function messageComponent(response: InteractionEditReplyOptions | InteractionUpdateOptions, index: number) {
+  const component = response.components?.at(index);
+  assert.ok(component && "toJSON" in component);
+  return component.toJSON();
+}
+
+function pageButtons(response: InteractionEditReplyOptions | InteractionUpdateOptions) {
+  const data = messageComponent(response, -1);
   assert.equal(data.type, ComponentType.ActionRow);
   return data.components;
 }
 
-function projectSelection(id: string, customId: string, projectId: string) {
-  const selection = discordInteraction("select", id);
-  selection.customId = customId;
-  selection.values = [projectId];
-  return selection;
+function projectList(response: InteractionEditReplyOptions | InteractionUpdateOptions, paginated = false) {
+  assert.equal(response.flags, MessageFlags.IsComponentsV2);
+  const heading = messageComponent(response, 0);
+  assert.equal(heading.type, ComponentType.TextDisplay);
+  const buttons = response.components?.slice(1, paginated ? -1 : undefined).map((_, index) => {
+    const row = messageComponent(response, index + 1);
+    assert.equal(row.type, ComponentType.ActionRow);
+    assert.equal(row.components.length, 1);
+    const [button] = row.components;
+    assert.ok(button.type === ComponentType.Button && "custom_id" in button);
+    return button;
+  });
+  assert.ok(buttons);
+  return { heading: heading.content, buttons };
+}
+
+function buttonPress(id: string, customId: string) {
+  const press = discordInteraction("button", id);
+  press.customId = customId;
+  return press;
 }
 
 async function openProjectPicker(handle: (interaction: Interaction) => Promise<unknown>, id: string) {
   const command = discordInteraction("command", id);
   await handle(command.asDiscordEvent());
-  const [picker] = actionRow(command.editReply.mock.calls[0].arguments[0], 0);
-  assert.ok(picker.type === ComponentType.StringSelect);
-  return picker;
+  return projectList(command.editReply.mock.calls[0].arguments[0]).buttons;
 }
 
 async function openTicketModal(handle: (interaction: Interaction) => Promise<unknown>, id = "open-ticket") {
-  const picker = await openProjectPicker(handle, id);
-  const select = projectSelection(`${id}-select`, picker.custom_id, picker.options[0].value);
+  const [project] = await openProjectPicker(handle, id);
+  const select = buttonPress(`${id}-select`, project.custom_id);
   await handle(select.asDiscordEvent());
   const modal = await select.showModal.mock.calls[0].result;
   assert.ok(modal);
@@ -229,7 +241,12 @@ test("replies through the entry point when Discord cannot display a picker or a 
     throw new Error("Discord could not display the picker");
   });
   await dispatch(command.asDiscordEvent());
-  assert.deepEqual(command.editReply.mock.calls[1]?.arguments, [ticketMessages.projectListUnavailable]);
+  const fallback = command.editReply.mock.calls[1].arguments[0];
+  assert.equal(fallback.flags, MessageFlags.IsComponentsV2);
+  assert.deepEqual(messageComponent(fallback, 0), {
+    type: ComponentType.TextDisplay,
+    content: ticketMessages.projectListUnavailable,
+  });
 
   const modal = await openTicketModal(dispatch);
   const submit = modalSubmission("failed-result", modal.custom_id);
@@ -286,18 +303,15 @@ test("fetches fresh project pages on command and submits a modal exactly once", 
   assert.equal(listingCount, 2);
 
   const listing = open.editReply.mock.calls[0].arguments[0];
-  assert.equal(listing.content, ticketMessages.selectProjectPage(1, 1));
   assert.equal(listing.components?.length, 2);
-  const [project] = actionRow(listing, 0);
-  assert.ok(project.type === ComponentType.StringSelect);
-  assert.equal(project.options.length, 1);
-  assert.partialDeepStrictEqual(project.options[0], { label: "プロジェクト 2 (#1)", value: "1" });
-  assert.partialDeepStrictEqual(actionRow(listing, 1), [
-    { type: ComponentType.Button, label: ticketMessages.previousPage, disabled: true },
-    { type: ComponentType.Button, label: ticketMessages.nextPage, disabled: true },
-  ]);
+  const { buttons } = projectList(listing);
+  assert.deepEqual(
+    buttons.map(({ label }) => label),
+    ["プロジェクト 2 (#1)"],
+  );
+  const [project] = buttons;
 
-  const select = projectSelection("select-project", project.custom_id, "1");
+  const select = buttonPress("select-project", project.custom_id);
   await handle(select.asDiscordEvent());
   const modal = await select.showModal.mock.calls[0].result;
   assert.ok(modal);
@@ -351,28 +365,27 @@ test("acknowledges commands before loading projects and keeps modal and picker l
   load.resolve([{ id: "1", name: "プロジェクト" }]);
   await opening;
 
-  const [picker] = actionRow(command.editReply.mock.calls[0].arguments[0], 0);
-  assert.ok(picker.type === ComponentType.StringSelect);
+  const [project] = projectList(command.editReply.mock.calls[0].arguments[0]).buttons;
 
-  const selection = projectSelection("open-modal", picker.custom_id, "1");
+  const selection = buttonPress("open-modal", project.custom_id);
   await handle(selection.asDiscordEvent());
   assert.equal(selection.showModal.mock.callCount(), 1);
 
   t.mock.timers.tick(9 * 60_000);
-  const failedSelection = projectSelection("failed-open", picker.custom_id, "1");
+  const failedSelection = buttonPress("failed-open", project.custom_id);
   failedSelection.showModal.mock.mockImplementationOnce(async () => {
     throw new Error("Discord could not display the modal");
   });
   await assert.rejects(handle(failedSelection.asDiscordEvent()), /could not display/);
 
-  const reopenedSelection = projectSelection("reopened-modal", picker.custom_id, "1");
+  const reopenedSelection = buttonPress("reopened-modal", project.custom_id);
   const showing = Promise.withResolvers<void>();
   reopenedSelection.showModal.mock.mockImplementationOnce(async (modal) => {
     await showing.promise;
     return modal.toJSON();
   });
   const reopening = handle(reopenedSelection.asDiscordEvent());
-  const concurrent = projectSelection("concurrent-selection", picker.custom_id, "1");
+  const concurrent = buttonPress("concurrent-selection", project.custom_id);
   await handle(concurrent.asDiscordEvent());
   assert.equal(concurrent.showModal.mock.callCount(), 0);
   assert.match(concurrent.reply.mock.calls[0].arguments[0].content ?? "", /混み合っています/);
@@ -382,7 +395,7 @@ test("acknowledges commands before loading projects and keeps modal and picker l
   assert.ok(modal);
 
   t.mock.timers.tick(60_000);
-  const expiredPicker = projectSelection("expired-picker", picker.custom_id, "1");
+  const expiredPicker = buttonPress("expired-picker", project.custom_id);
   await handle(expiredPicker.asDiscordEvent());
   assert.match(expiredPicker.reply.mock.calls[0].arguments[0].content ?? "", /このフォームは使用できません/);
   await handle(modalSubmission("submit-reopened", modal.custom_id).asDiscordEvent());
@@ -403,8 +416,8 @@ test("discards a picker session when Discord cannot display it", async () => {
   });
   await assert.rejects(handle(command.asDiscordEvent()), /could not display the picker/);
 
-  const picker = await openProjectPicker(handle, command.id);
-  assert.equal(picker.options[0].value, "1");
+  const [project] = await openProjectPicker(handle, command.id);
+  assert.equal(project.label, "プロジェクト (#1)");
 });
 
 test("restores the previous modal when Discord cannot display its replacement", async (t) => {
@@ -423,13 +436,13 @@ test("restores the previous modal when Discord cannot display its replacement", 
       createIssue,
     },
   });
-  const picker = await openProjectPicker(handle, "open-ticket");
-  const original = projectSelection("original-selection", picker.custom_id, "1");
+  const [firstProject, secondProject] = await openProjectPicker(handle, "open-ticket");
+  const original = buttonPress("original-selection", firstProject.custom_id);
   await handle(original.asDiscordEvent());
   const originalModal = await original.showModal.mock.calls[0].result;
   assert.ok(originalModal);
 
-  const replacement = projectSelection("replacement-selection", picker.custom_id, "2");
+  const replacement = buttonPress("replacement-selection", secondProject.custom_id);
   replacement.showModal.mock.mockImplementationOnce(async () => {
     throw new Error("Discord could not display the modal");
   });
@@ -494,7 +507,7 @@ test("consumes a modal once even while its acknowledgement is pending", async ()
   const owner = { userId: "owner", channelId: "channel" };
   const picker = await tickets.openPicker("picker", owner);
   assert.equal(picker.kind, "ready");
-  const selection = tickets.beginSelection("picker", owner, "select", ["1"]);
+  const selection = tickets.beginSelection("picker", owner, "select", "1");
   assert.equal(selection.kind, "ready");
   selection.finish(true);
 
@@ -554,9 +567,50 @@ test("explains what to do when ticket creation is rejected or cannot be confirme
   }
 });
 
+test("places 18 projects in individual rows on one page and opens the selected project", async (t) => {
+  t.mock.method(logger, "info", () => {});
+  const projects = Array.from({ length: 18 }, (_, index) => ({
+    id: String(Number.MAX_SAFE_INTEGER - index),
+    name: `チーム ${index + 1}\n${"😀".repeat(100)}`,
+  }));
+  const createIssue = mock.fn(async (_projectId: string, _subject: string) => ({
+    id: 81,
+    url: new URL("issues/81", baseUrl).href,
+  }));
+  const handle = createInteractionHandler({
+    guildId,
+    redmine: { loadProjects: async () => projects, createIssue },
+  });
+  const open = discordInteraction("command", "full-page");
+  await handle(open.asDiscordEvent());
+
+  const listing = open.editReply.mock.calls[0].arguments[0];
+  assert.equal(listing.components?.length, 19);
+  const { buttons } = projectList(listing);
+  assert.equal(new Set(buttons.map((button) => button.custom_id)).size, projects.length);
+  for (const [index, button] of buttons.entries()) {
+    const label = button.label ?? "";
+    assert.ok(label.length <= 80);
+    assert.equal(label, label.toWellFormed());
+    assert.doesNotMatch(label, /\n/);
+    assert.ok(label.endsWith(`… (#${projects[index].id})`));
+  }
+
+  const select = buttonPress("select-last-project", buttons[17].custom_id);
+  select.user.id = "another-user";
+  await handle(select.asDiscordEvent());
+  assert.equal(select.showModal.mock.callCount(), 0);
+  select.user.id = "owner";
+  await handle(select.asDiscordEvent());
+  const modal = await select.showModal.mock.calls[0].result;
+  assert.ok(modal);
+  await handle(modalSubmission("submit-for-last-project", modal.custom_id).asDiscordEvent());
+  assert.deepEqual(createIssue.mock.calls[0].arguments, [projects[17].id, "起票テスト"]);
+});
+
 test("reopens a modal from the project picker and accepts only the latest submission once", async (t) => {
   t.mock.method(logger, "info", () => {});
-  const projects = Array.from({ length: 26 }, (_, index) => ({
+  const projects = Array.from({ length: 25 }, (_, index) => ({
     id: String(index + 1),
     name: `チーム ${index + 1}`,
   }));
@@ -574,52 +628,56 @@ test("reopens a modal from the project picker and accepts only the latest submis
   const open = discordInteraction("command", "many-projects");
   await handle(open.asDiscordEvent());
   const reply = open.editReply.mock.calls[0].arguments[0];
-  assert.match(reply.content ?? "", /1\/2/);
-  const [firstPage] = actionRow(reply, 0);
-  assert.ok(firstPage.type === ComponentType.StringSelect);
-  assert.equal(firstPage.options.length, 25);
-  const [, next] = actionRow(reply, 1);
+  const firstPage = projectList(reply, true);
+  assert.match(firstPage.heading, /1\/2/);
+  assert.equal(firstPage.buttons.length, 18);
+  assert.equal(firstPage.buttons[0].label, "チーム 1 (#1)");
+  assert.equal(firstPage.buttons[17].label, "チーム 18 (#18)");
+  const [firstPrevious, next] = pageButtons(reply);
+  assert.ok(firstPrevious.type === ComponentType.Button && firstPrevious.disabled);
   assert.ok(next.type === ComponentType.Button && "custom_id" in next);
+  assert.equal(next.disabled, false);
+  // Count the heading, project rows and buttons, and navigation row and buttons.
+  assert.equal(1 + firstPage.buttons.length * 2 + 3, 40);
 
-  const page = discordInteraction("button", "next-page");
-  page.customId = next.custom_id;
+  const page = buttonPress("next-page", next.custom_id);
   page.user.id = "another-user";
   await handle(page.asDiscordEvent());
   assert.equal(page.update.mock.callCount(), 0);
   page.user.id = "owner";
   await handle(page.asDiscordEvent());
   const update = page.update.mock.calls[0].arguments[0];
-  assert.match(update.content ?? "", /2\/2/);
-  const [secondPage] = actionRow(update, 0);
-  assert.ok(secondPage.type === ComponentType.StringSelect);
-  assert.deepEqual(
-    secondPage.options.map(({ value }) => value),
-    ["26"],
-  );
-  const invalidSelection = projectSelection("unlisted-project", secondPage.custom_id, "27");
+  const secondPage = projectList(update, true);
+  assert.match(secondPage.heading, /2\/2/);
+  assert.equal(secondPage.buttons.length, 7);
+  assert.equal(secondPage.buttons[0].label, "チーム 19 (#19)");
+  const lastProject = secondPage.buttons[6];
+  assert.equal(lastProject.label, "チーム 25 (#25)");
+  const invalidSelection = buttonPress("unlisted-project", lastProject.custom_id.replace(/:25$/, ":26"));
   await handle(invalidSelection.asDiscordEvent());
   assert.equal(invalidSelection.showModal.mock.callCount(), 0);
   assert.match(invalidSelection.reply.mock.calls[0].arguments[0].content ?? "", /このフォームは使用できません/);
 
-  const select = projectSelection("select-project", secondPage.custom_id, "26");
+  const select = buttonPress("select-project", lastProject.custom_id);
   await handle(select.asDiscordEvent());
   const modal = await select.showModal.mock.calls[0].result;
   assert.ok(modal);
 
-  const [previous] = actionRow(update, 1);
+  const [previous, lastNext] = pageButtons(update);
   assert.ok(previous.type === ComponentType.Button && "custom_id" in previous);
-  const back = discordInteraction("button", "previous-page");
-  back.customId = previous.custom_id;
+  assert.equal(previous.disabled, false);
+  assert.ok(lastNext.type === ComponentType.Button && lastNext.disabled);
+  const back = buttonPress("previous-page", previous.custom_id);
   await handle(back.asDiscordEvent());
-  assert.match(back.update.mock.calls[0].arguments[0].content ?? "", /1\/2/);
+  assert.match(projectList(back.update.mock.calls[0].arguments[0], true).heading, /1\/2/);
 
-  const newSelect = projectSelection("select-another-project", firstPage.custom_id, "1");
+  const newSelect = buttonPress("select-another-project", firstPage.buttons[0].custom_id);
   await handle(newSelect.asDiscordEvent());
   const newModal = await newSelect.showModal.mock.calls[0].result;
   assert.ok(newModal);
   assert.notEqual(newModal.custom_id, modal.custom_id);
 
-  const duplicatedSelection = projectSelection(select.id, select.customId, "26");
+  const duplicatedSelection = buttonPress(select.id, select.customId);
   duplicatedSelection.showModal.mock.mockImplementationOnce(async () => {
     throw new Error("Discord already acknowledged this interaction");
   });

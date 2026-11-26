@@ -117,15 +117,9 @@ export function createTicketUseCase(redmine: RedmineOperations, projectsPerPage:
     return projectPage(session.projects, index);
   }
 
-  function beginSelection(
-    id: string,
-    owner: FormOwner,
-    triggerId: string,
-    values: readonly string[],
-  ): ProjectSelection {
+  function beginSelection(id: string, owner: FormOwner, triggerId: string, projectId: string): ProjectSelection {
     const session = findPicker(id, owner);
-    const [projectId] = values;
-    if (!session || values.length !== 1 || !session.projects.some((project) => project.id === projectId)) {
+    if (!session?.projects.some((project) => project.id === projectId)) {
       return { kind: "invalid" };
     }
     if (session.modal?.triggerId === triggerId) return { kind: "duplicate" };
