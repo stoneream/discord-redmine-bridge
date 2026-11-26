@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { mock, test } from "node:test";
+import { setImmediate } from "node:timers/promises";
 import {
   Client,
   ComponentType,
+  Events,
   MessageFlags,
   type Interaction,
   type InteractionEditReplyOptions,
@@ -11,9 +13,11 @@ import {
   type InteractionUpdateOptions,
   type ModalBuilder,
 } from "discord.js";
-import { command, createInteractionHandler } from "../src/interactions.ts";
 import { logger } from "../src/logger.ts";
+import { ticketMessages } from "../src/message_const.ts";
 import { RedmineClient, RedmineError, type RedmineProject } from "../src/redmine.ts";
+import { command, createInteractionHandler } from "../src/server/interactions.ts";
+import { createTicketUseCase } from "../src/usecase/ticket.ts";
 
 const guildId = "123456789012345678";
 const baseUrl = new URL("https://redmine.example.test/work/");
@@ -137,6 +141,7 @@ function discordInteraction(kind: "command" | "select" | "button" | "modal", id:
     isButton: () => kind === "button",
     isStringSelectMenu: () => kind === "select",
     isModalSubmit: () => kind === "modal",
+    isRepliable: () => true,
     showModal: mock.fn(async (modal: ModalBuilder) => modal.toJSON()),
     reply: mock.fn(async (response: InteractionReplyOptions) => response),
     editReply: mock.fn(async (response: InteractionEditReplyOptions) => response),
@@ -174,17 +179,67 @@ function projectSelection(id: string, customId: string, projectId: string) {
   return selection;
 }
 
-async function openTicketModal(handle: ReturnType<typeof createInteractionHandler>) {
-  const command = discordInteraction("command", "open-ticket");
+async function openProjectPicker(handle: (interaction: Interaction) => Promise<unknown>, id: string) {
+  const command = discordInteraction("command", id);
   await handle(command.asDiscordEvent());
   const [picker] = actionRow(command.editReply.mock.calls[0].arguments[0], 0);
   assert.ok(picker.type === ComponentType.StringSelect);
-  const select = projectSelection("select-project", picker.custom_id, picker.options[0].value);
+  return picker;
+}
+
+async function openTicketModal(handle: (interaction: Interaction) => Promise<unknown>, id = "open-ticket") {
+  const picker = await openProjectPicker(handle, id);
+  const select = projectSelection(`${id}-select`, picker.custom_id, picker.options[0].value);
   await handle(select.asDiscordEvent());
   const modal = await select.showModal.mock.calls[0].result;
   assert.ok(modal);
   return modal;
 }
+
+test("replies through the entry point when Discord cannot display a picker or a creation result", async (t) => {
+  t.mock.property(process, "env", {
+    ...process.env,
+    DISCORD_TOKEN: "test-token",
+    DISCORD_GUILD_ID: guildId,
+    REDMINE_URL: baseUrl.href,
+    REDMINE_API_KEY: "test-key",
+  });
+  t.mock.method(logger, "info", () => {});
+  t.mock.method(logger, "error", () => {});
+  const login = t.mock.method(Client.prototype, "login", async () => "test-login");
+  t.mock.method(RedmineClient.prototype, "loadProjects", async () => [{ id: "1", name: "プロジェクト" }]);
+  const createIssue = t.mock.method(RedmineClient.prototype, "createIssue", async () => ({
+    id: 81,
+    url: new URL("issues/81", baseUrl).href,
+  }));
+
+  await import(new URL("../src/index.ts?interaction-error-test", import.meta.url).href);
+  const client = login.mock.calls[0]?.this;
+  assert.ok(client instanceof Client);
+  t.after(() => client.destroy());
+
+  const dispatch = async (interaction: Interaction) => {
+    client.emit(Events.InteractionCreate, interaction);
+    // The listener schedules its replies through promises, with all external calls mocked.
+    await setImmediate();
+  };
+
+  const command = discordInteraction("command", "failed-picker");
+  command.editReply.mock.mockImplementationOnce(async () => {
+    throw new Error("Discord could not display the picker");
+  });
+  await dispatch(command.asDiscordEvent());
+  assert.deepEqual(command.editReply.mock.calls[1]?.arguments, [ticketMessages.projectListUnavailable]);
+
+  const modal = await openTicketModal(dispatch);
+  const submit = modalSubmission("failed-result", modal.custom_id);
+  submit.editReply.mock.mockImplementationOnce(async () => {
+    throw new Error("Discord could not display the creation result");
+  });
+  await dispatch(submit.asDiscordEvent());
+  assert.equal(createIssue.mock.callCount(), 1);
+  assert.deepEqual(submit.editReply.mock.calls[1]?.arguments, [ticketMessages.resultUnavailable]);
+});
 
 test("fetches fresh project pages on command and submits a modal exactly once", async (t) => {
   const infoLog = t.mock.method(logger, "info", () => {});
@@ -327,6 +382,136 @@ test("acknowledges commands before loading projects and keeps modal and picker l
   assert.match(expiredPicker.reply.mock.calls[0].arguments[0].content ?? "", /このフォームは使用できません/);
   await handle(modalSubmission("submit-reopened", modal.custom_id).asDiscordEvent());
   assert.equal(createIssue.mock.callCount(), 1);
+});
+
+test("discards a picker session when Discord cannot display it", async () => {
+  const handle = createInteractionHandler({
+    guildId,
+    redmine: {
+      loadProjects: async () => [{ id: "1", name: "プロジェクト" }],
+      createIssue: async () => assert.fail("Opening a picker must not create an issue"),
+    },
+  });
+  const command = discordInteraction("command", "open-ticket");
+  command.editReply.mock.mockImplementationOnce(async () => {
+    throw new Error("Discord could not display the picker");
+  });
+  await assert.rejects(handle(command.asDiscordEvent()), /could not display the picker/);
+
+  const picker = await openProjectPicker(handle, command.id);
+  assert.equal(picker.options[0].value, "1");
+});
+
+test("restores the previous modal when Discord cannot display its replacement", async (t) => {
+  t.mock.method(logger, "info", () => {});
+  const createIssue = mock.fn(async (_projectId: string, _subject: string) => ({
+    id: 81,
+    url: new URL("issues/81", baseUrl).href,
+  }));
+  const handle = createInteractionHandler({
+    guildId,
+    redmine: {
+      loadProjects: async () => [
+        { id: "1", name: "プロジェクト 1" },
+        { id: "2", name: "プロジェクト 2" },
+      ],
+      createIssue,
+    },
+  });
+  const picker = await openProjectPicker(handle, "open-ticket");
+  const original = projectSelection("original-selection", picker.custom_id, "1");
+  await handle(original.asDiscordEvent());
+  const originalModal = await original.showModal.mock.calls[0].result;
+  assert.ok(originalModal);
+
+  const replacement = projectSelection("replacement-selection", picker.custom_id, "2");
+  replacement.showModal.mock.mockImplementationOnce(async () => {
+    throw new Error("Discord could not display the modal");
+  });
+  await assert.rejects(handle(replacement.asDiscordEvent()), /could not display the modal/);
+  const failedModal = replacement.showModal.mock.calls[0].arguments[0].toJSON();
+  await handle(modalSubmission("failed-modal", failedModal.custom_id).asDiscordEvent());
+  assert.equal(createIssue.mock.callCount(), 0);
+
+  await handle(modalSubmission("restore-original", originalModal.custom_id).asDiscordEvent());
+  assert.deepEqual(
+    createIssue.mock.calls.map(({ arguments: args }) => args),
+    [["1", "起票テスト"]],
+  );
+});
+
+test("releases a creation slot if Discord cannot acknowledge the submission", async (t) => {
+  t.mock.method(logger, "info", () => {});
+  const pendingIssue = Promise.withResolvers<{ id: number; url: string }>();
+  const createIssue = mock.fn(() => pendingIssue.promise);
+  const handle = createInteractionHandler({
+    guildId,
+    redmine: { loadProjects: async () => [{ id: "1", name: "プロジェクト" }], createIssue },
+  });
+  const submissions = await Promise.all(
+    Array.from({ length: 12 }, async (_, index) => {
+      const modal = await openTicketModal(handle, `open-ticket-${index}`);
+      return modalSubmission(`submit-${index}`, modal.custom_id);
+    }),
+  );
+  const [failed, busy, replacement, ...others] = submissions;
+  const inProgress = others.map((submission) => handle(submission.asDiscordEvent()));
+  const acknowledgement = Promise.withResolvers<void>();
+  failed.deferReply.mock.mockImplementationOnce(() => acknowledgement.promise);
+  const failure = assert.rejects(handle(failed.asDiscordEvent()), /could not acknowledge/);
+
+  await handle(busy.asDiscordEvent());
+  assert.equal(busy.deferReply.mock.callCount(), 0);
+  assert.match(busy.reply.mock.calls[0].arguments[0].content ?? "", /混み合っています/);
+  assert.equal(createIssue.mock.callCount(), 9);
+
+  acknowledgement.reject(new Error("Discord could not acknowledge the submission"));
+  await failure;
+  assert.equal(createIssue.mock.callCount(), 9);
+
+  const saving = handle(replacement.asDiscordEvent());
+  await Promise.resolve();
+  assert.equal(createIssue.mock.callCount(), 10);
+  pendingIssue.resolve({ id: 81, url: new URL("issues/81", baseUrl).href });
+  await Promise.all([...inProgress, saving]);
+});
+
+test("consumes a modal once even while its acknowledgement is pending", async () => {
+  const issue = { id: 81, url: new URL("issues/81", baseUrl).href };
+  const createIssue = mock.fn(async (_projectId: string, _subject: string) => issue);
+  const tickets = createTicketUseCase(
+    {
+      loadProjects: async () => [{ id: "1", name: "プロジェクト" }],
+      createIssue,
+    },
+    25,
+  );
+  const owner = { userId: "owner", channelId: "channel" };
+  const picker = await tickets.openPicker("picker", owner);
+  assert.equal(picker.kind, "ready");
+  const selection = tickets.beginSelection("picker", owner, "select", ["1"]);
+  assert.equal(selection.kind, "ready");
+  selection.finish(true);
+
+  const pendingAcknowledgement = Promise.withResolvers<void>();
+  const form = {
+    readSubject: mock.fn(() => " 起票テスト "),
+    acknowledge: mock.fn(() => pendingAcknowledgement.promise),
+  };
+  const submit = () => tickets.submitModal("picker", owner, selection.nonce, form);
+  const first = submit();
+  assert.equal(createIssue.mock.callCount(), 0);
+  assert.deepEqual(await submit(), { kind: "invalidForm" });
+  pendingAcknowledgement.resolve();
+  assert.deepEqual(await first, { kind: "created", projectId: "1", issue });
+  assert.deepEqual(await submit(), { kind: "invalidForm" });
+
+  assert.equal(form.readSubject.mock.callCount(), 1);
+  assert.equal(form.acknowledge.mock.callCount(), 1);
+  assert.deepEqual(
+    createIssue.mock.calls.map(({ arguments: args }) => args),
+    [["1", "起票テスト"]],
+  );
 });
 
 test("explains what to do when ticket creation is rejected or cannot be confirmed", async (t) => {
