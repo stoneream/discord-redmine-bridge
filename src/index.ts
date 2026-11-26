@@ -1,9 +1,9 @@
-import { Client, Events, GatewayIntentBits, MessageFlags } from "discord.js";
+import { Client, Events, GatewayIntentBits } from "discord.js";
 import { loadConfig } from "./config.ts";
-import { command, createInteractionHandler } from "./interactions.ts";
 import { logger, reportDiscordError } from "./logger.ts";
-import { logMessages, ticketMessages } from "./message_const.ts";
+import { logMessages } from "./message_const.ts";
 import { RedmineClient } from "./redmine.ts";
+import { command, createInteractionHandler, respondToInteractionError } from "./server/interactions.ts";
 
 const SECRET_PREFIX_LENGTH = 5;
 
@@ -42,25 +42,7 @@ async function start() {
   const handleInteraction = createInteractionHandler({ guildId: config.guildId, redmine });
 
   client.on(Events.InteractionCreate, (interaction) => {
-    void handleInteraction(interaction).catch(async (error) => {
-      reportDiscordError(logMessages.operationFailed, error, interaction);
-      try {
-        if (!interaction.isRepliable()) return;
-        if (interaction.deferred) {
-          const message = interaction.isModalSubmit()
-            ? ticketMessages.resultUnavailable
-            : ticketMessages.projectListUnavailable;
-          await interaction.editReply(message);
-        } else if (!interaction.replied) {
-          await interaction.reply({
-            content: ticketMessages.creationFailed,
-            flags: MessageFlags.Ephemeral,
-          });
-        }
-      } catch (replyError) {
-        reportDiscordError(logMessages.replyFailed, replyError, interaction);
-      }
-    });
+    void handleInteraction(interaction).catch((error) => respondToInteractionError(interaction, error));
   });
 
   client.on(Events.Error, (error) => reportDiscordError(logMessages.discordError, error));
